@@ -1,0 +1,5 @@
+pydantic
+pydantic[email]
+flask
+flask-mongo
+dotenv

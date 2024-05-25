@@ -1,67 +1,152 @@
 from flask import Blueprint, request, jsonify
-from .extensions import mongo
-from bson.objectid import ObjectId
-from datetime import datetime
+from .extensions import mongo, validate_api_key
+from .models import User, Products,  Orders
 
+# Loading blueprint for our api
 api = Blueprint('api', __name__)
 
-@api.route('/users', methods=['POST'])
-def create_user():
-    data = request.json
-    user = {
-        'username': data['username'],
-        'email': data['email'],
-        'password': data['password']
-    }
-    result = mongo.db.users.insert_one(user)
-    return jsonify({"message": "User created", "user_id": str(result.inserted_id)}), 201
 
-@api.route('/products', methods=['POST'])
-def create_product():
-    data = request.json
-    product = {
-        'name': data['name'],
-        'description': data.get('description'),
-        'price': data['price'],
-        'quantity': data['quantity']
-    }
-    result = mongo.db.products.insert_one(product)
-    return jsonify({"message": "Product created", "product_id": str(result.inserted_id)}), 201
+@api.route('/register', methods=['POST'])
+def register_users():
+    try:
+        api_key = request.args.get('api_key')
 
-@api.route('/products', methods=['GET'])
+        # validate API key
+        if not validate_api_key(api_key=api_key):
+            return jsonify({"error": "Invalid API key"}), 403
+
+        # extract user data from request
+        user_data = request.json
+        user_exists = mongo.db.users.find_one({'email': user_data['email']})
+        # check if user already exists
+        if user_exists:
+            return jsonify({"error": "User already exists"}), 409
+
+        # create new user and save to database
+        new_user = User(**user_data)
+        result = new_user.save()
+        return jsonify(result), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@api.route('/users', methods=['GET'])
+def get_users():
+    try:
+        # validate API key
+        api_key = request.args.get('api_key')
+        if not validate_api_key(api_key=api_key):
+            return jsonify({"error": "Invalid API key"}), 403
+
+        # Find all users in the database
+        users_data = list(mongo.db.users.find({}, {'password': 0}))
+
+        # Check if user database is empty or not
+        if users_data:
+            return jsonify(users_data), 200
+        else:
+            return jsonify({"message": "No users found"}), 404
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@api.route('/users/<string:user_id>', methods=['GET'])
+def get_user_by_id(user_id):
+    try:
+        # validate API key
+        api_key = request.args.get('api_key')
+        if not validate_api_key(api_key=api_key):
+            return jsonify({"error": "Invalid API key"}), 403
+
+        # Find user with specified id
+        user_data = mongo.db.users.find_one({"_id": user_id}, {'password': 0})
+        if user_data:
+            return jsonify(user_data), 200
+        else:
+            return jsonify({"error": "User not found"}), 404
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@api.route('/products', methods=['GET', 'POST'])
 def get_products():
-    products = mongo.db.products.find()
-    result = [{"id": str(p["_id"]), "name": p["name"], "description": p.get("description"), "price": p["price"], "quantity": p["quantity"]} for p in products]
-    return jsonify(result), 200
+    try:
+        # validate API key
+        api_key = request.args.get('api_key')
+        if not validate_api_key(api_key=api_key):
+            return jsonify({"error": "Invalid API key"}), 403
 
-@api.route('/orders', methods=['POST'])
-def create_order():
-    data = request.json
-    user_id = data['user_id']
-    product_orders = data['products']
+        if request.method == 'GET':
 
-    total_price = 0
-    for product_order in product_orders:
-        product = mongo.db.products.find_one({"_id": ObjectId(product_order['product_id'])})
-        total_price += product['price'] * product_order['quantity']
+            # Get product name from request parameters
+            product_name = request.args.get('product_name')
+            if product_name:
+                # Find the specified product
+                product_data = mongo.db.products.find_one(
+                    {"product_name": product_name})
 
-    order = {
-        'user_id': user_id,
-        'products': product_orders,
-        'total_price': total_price,
-        'timestamp': datetime.utcnow()
-    }
-    result = mongo.db.orders.insert_one(order)
-    return jsonify({"message": "Order created", "order_id": str(result.inserted_id)}), 201
+                if product_data:
+                    return jsonify(product_data), 200
+                else:
+                    return jsonify({"message": "Product not found"}), 404
+            else:
+                products_data = list(mongo.db.products.find({}, {'_id': 0}))
+                if products_data:
+                    return jsonify(products_data), 200
+                else:
+                    return jsonify({"message": "No products found"}), 404
 
-@api.route('/orders', methods=['GET'])
-def get_orders():
-    orders = mongo.db.orders.find()
-    result = [{
-        "id": str(o["_id"]),
-        "user_id": o["user_id"],
-        "total_price": o["total_price"],
-        "timestamp": o["timestamp"],
-        "products": o["products"]
-    } for o in orders]
-    return jsonify(result), 200
+        elif request.method == 'POST':
+
+            # Extract product data from request
+            product_data = request.json
+
+            # Create new product and save to database
+            new_product = Products(**product_data)
+            result = new_product.save()
+            return jsonify(result), 201
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@api.route('/order', methods=['GET', 'POST'])
+def place_order():
+    try:
+        # Validate API key
+        api_key = request.args.get('api_key')
+        if not validate_api_key(api_key=api_key):
+            return jsonify({"error": "Enter valid api key"})
+
+        if request.method == 'POST':
+            total_price = 0
+            response = request.json
+            orders = Orders(**response)
+
+            # Calculate total price and update product stock
+            for products in orders.product:
+                product_info = mongo.db.products.find_one(
+                    {'product_name': products['product_name']}) or {}
+                if not product_info:
+                    return jsonify({'error': 'Product not found'}), 404
+                price_per_unit = product_info.get('price', 0)
+                quantity = products.get('quantity', 0)
+                total_price += quantity * price_per_unit
+
+                # Update product stock
+                mongo.db.products.update_one({'_id': product_info['_id']}, {
+                    '$inc': {'stock': -products.get('quantity', 0)}})
+
+            # Save order with total price
+            orders.total_price = total_price
+            orders.save()
+            return jsonify({'data': 'Order placed successfully.'}), 201
+
+        else:
+            return jsonify({'error': 'Oops something went wrong'}), 400
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
